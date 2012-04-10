@@ -9,6 +9,28 @@ import (
 	"sync"
 )
 
+func max(i,j int) int {
+	if i>j {
+		return i
+	}
+	return j
+}
+
+func min(i, j int) int {
+	if i<j {
+		return i
+	}
+	return j
+}
+
+// historyIdxValue returns an index into a valid range of history
+func historyIdxValue(idx int, history [][]byte) int {
+	out := idx
+	out = min(len(history)-1, out)
+	out = max(0, out)
+	return out
+}
+
 // EscapeCodes contains escape sequences that can be written to the terminal in
 // order to achieve different styles of text.
 type EscapeCodes struct {
@@ -20,16 +42,16 @@ type EscapeCodes struct {
 }
 
 var vt100EscapeCodes = EscapeCodes{
-	Black:   []byte{keyEscape, '[', '3', '0', 'm'},
-	Red:     []byte{keyEscape, '[', '3', '1', 'm'},
-	Green:   []byte{keyEscape, '[', '3', '2', 'm'},
-	Yellow:  []byte{keyEscape, '[', '3', '3', 'm'},
-	Blue:    []byte{keyEscape, '[', '3', '4', 'm'},
-	Magenta: []byte{keyEscape, '[', '3', '5', 'm'},
-	Cyan:    []byte{keyEscape, '[', '3', '6', 'm'},
-	White:   []byte{keyEscape, '[', '3', '7', 'm'},
+	Black:   []byte{KeyEscape, '[', '3', '0', 'm'},
+	Red:     []byte{KeyEscape, '[', '3', '1', 'm'},
+	Green:   []byte{KeyEscape, '[', '3', '2', 'm'},
+	Yellow:  []byte{KeyEscape, '[', '3', '3', 'm'},
+	Blue:    []byte{KeyEscape, '[', '3', '4', 'm'},
+	Magenta: []byte{KeyEscape, '[', '3', '5', 'm'},
+	Cyan:    []byte{KeyEscape, '[', '3', '6', 'm'},
+	White:   []byte{KeyEscape, '[', '3', '7', 'm'},
 
-	Reset: []byte{keyEscape, '[', '0', 'm'},
+	Reset: []byte{KeyEscape, '[', '0', 'm'},
 }
 
 // Terminal contains the state for running a VT100 terminal that is capable of
@@ -55,6 +77,10 @@ type Terminal struct {
 
 	// line is the current line being entered.
 	line []byte
+	// history is a buffer of previously entered lines
+	history [][]byte
+	// index into the history buffer (for use in the handleKey(KeyUp) function)
+	historyIdx int
 	// pos is the logical position of the cursor in line
 	pos int
 	// echo is true if local echo is enabled
@@ -86,6 +112,8 @@ func NewTerminal(c io.ReadWriter, prompt string) *Terminal {
 		Escape:     &vt100EscapeCodes,
 		c:          c,
 		prompt:     prompt,
+		history:    make([][]byte, 0, 100),
+		historyIdx: -1,
 		termWidth:  80,
 		termHeight: 24,
 		echo:       true,
@@ -93,17 +121,17 @@ func NewTerminal(c io.ReadWriter, prompt string) *Terminal {
 }
 
 const (
-	keyCtrlD     = 4
-	keyEnter     = '\r'
-	keyEscape    = 27
-	keyBackspace = 127
-	keyUnknown   = 256 + iota
-	keyUp
-	keyDown
-	keyLeft
-	keyRight
-	keyAltLeft
-	keyAltRight
+	KeyCtrlD     = 4
+	KeyEnter     = '\r'
+	KeyEscape    = 27
+	KeyBackspace = 127
+	KeyUnknown   = 256 + iota
+	KeyLeft      
+	KeyUp        
+	KeyRight     
+	KeyDown      
+	KeyAltLeft
+	KeyAltRight
 )
 
 // bytesToKey tries to parse a key sequence from b. If successful, it returns
@@ -113,29 +141,34 @@ func bytesToKey(b []byte) (int, []byte) {
 		return -1, nil
 	}
 
-	if b[0] != keyEscape {
+	if b[0] != KeyEscape {
 		return int(b[0]), b[1:]
 	}
 
-	if len(b) >= 3 && b[0] == keyEscape && b[1] == '[' {
+	if len(b) >= 3 && b[0] == KeyEscape && b[1] == '[' {
 		switch b[2] {
 		case 'A':
-			return keyUp, b[3:]
+			return KeyUp, b[3:]
 		case 'B':
-			return keyDown, b[3:]
+			return KeyDown, b[3:]
 		case 'C':
-			return keyRight, b[3:]
+			return KeyRight, b[3:]
 		case 'D':
-			return keyLeft, b[3:]
+			return KeyLeft, b[3:]
 		}
 	}
 
-	if len(b) >= 6 && b[0] == keyEscape && b[1] == '[' && b[2] == '1' && b[3] == ';' && b[4] == '3' {
+	if len(b) >= 6 && 
+		b[0] == KeyEscape && 
+		b[1] == '[' && 
+		b[2] == '1' && 
+		b[3] == ';' && 
+		b[4] == '3' {
 		switch b[5] {
 		case 'C':
-			return keyAltRight, b[6:]
+			return KeyAltRight, b[6:]
 		case 'D':
-			return keyAltLeft, b[6:]
+			return KeyAltLeft, b[6:]
 		}
 	}
 
@@ -145,7 +178,7 @@ func bytesToKey(b []byte) (int, []byte) {
 	// appears at the end of a sequence.
 	for i, c := range b[0:] {
 		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' {
-			return keyUnknown, b[i+1:]
+			return KeyUnknown, b[i+1:]
 		}
 	}
 
@@ -157,7 +190,7 @@ func (t *Terminal) queue(data []byte) {
 	t.outBuf = append(t.outBuf, data...)
 }
 
-var eraseUnderCursor = []byte{' ', keyEscape, '[', 'D'}
+var eraseUnderCursor = []byte{' ', KeyEscape, '[', 'D'}
 var space = []byte{' '}
 
 func isPrintable(key int) bool {
@@ -204,25 +237,25 @@ func (t *Terminal) move(up, down, left, right int) {
 	movement := make([]byte, 3*(up+down+left+right))
 	m := movement
 	for i := 0; i < up; i++ {
-		m[0] = keyEscape
+		m[0] = KeyEscape
 		m[1] = '['
 		m[2] = 'A'
 		m = m[3:]
 	}
 	for i := 0; i < down; i++ {
-		m[0] = keyEscape
+		m[0] = KeyEscape
 		m[1] = '['
 		m[2] = 'B'
 		m = m[3:]
 	}
 	for i := 0; i < left; i++ {
-		m[0] = keyEscape
+		m[0] = KeyEscape
 		m[1] = '['
 		m[2] = 'D'
 		m = m[3:]
 	}
 	for i := 0; i < right; i++ {
-		m[0] = keyEscape
+		m[0] = KeyEscape
 		m[1] = '['
 		m[2] = 'C'
 		m = m[3:]
@@ -232,7 +265,7 @@ func (t *Terminal) move(up, down, left, right int) {
 }
 
 func (t *Terminal) clearLineToRight() {
-	op := []byte{keyEscape, '[', 'K'}
+	op := []byte{KeyEscape, '[', 'K'}
 	t.queue(op)
 }
 
@@ -242,7 +275,7 @@ const maxLineLength = 4096
 // that the user has entered.
 func (t *Terminal) handleKey(key int) (line string, ok bool) {
 	switch key {
-	case keyBackspace:
+	case KeyBackspace:
 		if t.pos == 0 {
 			return
 		}
@@ -256,7 +289,7 @@ func (t *Terminal) handleKey(key int) (line string, ok bool) {
 		}
 		t.queue(eraseUnderCursor)
 		t.moveCursorToPos(t.pos)
-	case keyAltLeft:
+	case KeyAltLeft:
 		// move left by a word.
 		if t.pos == 0 {
 			return
@@ -276,7 +309,7 @@ func (t *Terminal) handleKey(key int) (line string, ok bool) {
 			t.pos--
 		}
 		t.moveCursorToPos(t.pos)
-	case keyAltRight:
+	case KeyAltRight:
 		// move right by a word.
 		for t.pos < len(t.line) {
 			if t.line[t.pos] == ' ' {
@@ -291,19 +324,59 @@ func (t *Terminal) handleKey(key int) (line string, ok bool) {
 			t.pos++
 		}
 		t.moveCursorToPos(t.pos)
-	case keyLeft:
+	case KeyLeft:
 		if t.pos == 0 {
 			return
 		}
 		t.pos--
 		t.moveCursorToPos(t.pos)
-	case keyRight:
+	case KeyRight:
 		if t.pos == len(t.line) {
 			return
 		}
 		t.pos++
 		t.moveCursorToPos(t.pos)
-	case keyEnter:
+	case KeyUp:
+		if len(t.history) == 0 {
+			return
+		}
+		t.historyIdx--
+		t.historyIdx = historyIdxValue(t.historyIdx, t.history)
+		newLine := t.history[t.historyIdx]
+		newPos  := len(newLine)
+		if t.echo {
+			t.moveCursorToPos(0)
+			t.writeLine(newLine)
+			for i := len(newLine); i < len(t.line); i++ {
+				t.writeLine(space)
+			}
+			t.moveCursorToPos(newPos)
+		}
+		t.line = newLine
+		t.pos = newPos
+		return
+
+	case KeyDown:
+		if len(t.history) == 0 {
+			return
+		}
+		t.historyIdx++
+		t.historyIdx = historyIdxValue(t.historyIdx, t.history)
+		newLine := t.history[t.historyIdx]
+		newPos  := len(newLine)
+		if t.echo {
+			t.moveCursorToPos(0)
+			t.writeLine(newLine)
+			for i := len(newLine); i < len(t.line); i++ {
+				t.writeLine(space)
+			}
+			t.moveCursorToPos(newPos)
+		}
+		t.line = newLine
+		t.pos = newPos
+		return
+
+	case KeyEnter:
 		t.moveCursorToPos(len(t.line))
 		t.queue([]byte("\r\n"))
 		line = string(t.line)
@@ -313,6 +386,7 @@ func (t *Terminal) handleKey(key int) (line string, ok bool) {
 		t.cursorX = 0
 		t.cursorY = 0
 		t.maxLine = 0
+		t.historyIdx = len(t.history)+1
 	default:
 		if t.AutoCompleteCallback != nil {
 			t.lock.Unlock()
@@ -469,7 +543,7 @@ func (t *Terminal) readLine() (line string, err error) {
 			if key < 0 {
 				break
 			}
-			if key == keyCtrlD {
+			if key == KeyCtrlD {
 				return "", io.EOF
 			}
 			line, lineOk = t.handleKey(key)
@@ -483,6 +557,10 @@ func (t *Terminal) readLine() (line string, err error) {
 		t.c.Write(t.outBuf)
 		t.outBuf = t.outBuf[:0]
 		if lineOk {
+			if t.echo {
+				// don't put passwords into history...
+				t.history = append(t.history, []byte(line))
+			}
 			return
 		}
 
