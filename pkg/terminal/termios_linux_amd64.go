@@ -1,3 +1,4 @@
+// +build linux,amd64
 // Created by cgo -godefs - DO NOT EDIT
 // cgo -godefs termios.go
 

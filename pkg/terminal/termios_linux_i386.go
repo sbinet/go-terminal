@@ -1,3 +1,4 @@
+// +build linux,i386
 // Created by cgo -godefs - DO NOT EDIT
 // cgo -godefs termios.go
 
